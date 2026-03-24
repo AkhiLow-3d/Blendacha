@@ -1025,32 +1025,42 @@ class HG_PT_CollectionPanel(bpy.types.Panel):
         badges = data["inventory"]["badges"]
         stickers = data["inventory"]["stickers"]
 
-        row = layout.row()
+        header = layout.box()
+        row = header.row(align=True)
         row.label(text=f"バッジ: {len(badges)}")
         row.label(text=f"ステッカー: {len(stickers)}")
 
-        if 0 <= scene.hg_inventory_index < len(scene.hg_inventory_items):
-            selected = scene.hg_inventory_items[scene.hg_inventory_index]
-            box = layout.box()
-            box.label(text=f"{selected.rarity} / {selected.item_type}")
-            box.label(text=selected.name)
+        # Upper section: selected item preview
+        preview_box = layout.box()
+        preview_box.label(text="選択中アイテム", icon='IMAGE_DATA')
+
+        if len(scene.hg_inventory_items) == 0:
+            preview_box.label(text="まだアイテムがありません")
+        else:
+            index = min(max(scene.hg_inventory_index, 0), len(scene.hg_inventory_items) - 1)
+            selected = scene.hg_inventory_items[index]
+            preview_box.label(text=f"{selected.rarity} / {selected.item_type}")
+            preview_box.label(text=selected.name)
             if selected.image_path:
                 icon_id = get_preview_icon_id(selected.image_path, selected.item_id)
                 if icon_id:
-                    box.template_icon(icon_value=icon_id, scale=8.0)
-                    box.label(text=selected.image_path)
+                    preview_box.template_icon(icon_value=icon_id, scale=8.0)
                 else:
-                    box.label(text="画像プレビュー読み込み失敗")
-                    box.label(text=selected.image_path)
+                    preview_box.label(text="画像プレビュー読み込み失敗")
+                preview_box.label(text=selected.image_path)
+            else:
+                preview_box.label(text="画像なし")
 
-        layout.template_list(
+        # Lower section: inventory list
+        list_box = layout.box()
+        list_box.label(text="所持アイテム一覧", icon='PRESET')
+        list_box.template_list(
             "HG_UL_inventory_list",
             "",
             scene,
             "hg_inventory_items",
             scene,
             "hg_inventory_index",
-        "hg_image_folder_input",
             rows=8,
         )
 

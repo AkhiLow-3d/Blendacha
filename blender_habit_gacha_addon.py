@@ -10,11 +10,13 @@ bl_info = {
 
 import bpy
 import json
+import bpy.utils.previews
 import random
 import time
 from pathlib import Path
+import tempfile
 from datetime import datetime, timedelta
-from bpy.props import BoolProperty, IntProperty, StringProperty
+from bpy.props import BoolProperty, IntProperty, StringProperty, FloatProperty
 
 # =========================================================
 # Constants
@@ -62,13 +64,13 @@ REWARD_TABLE = {
 }
 
 GACHA_TABLE = [
-    {"id": "badge_beginner", "name": "Beginner Badge", "rarity": "N", "type": "badge"},
-    {"id": "sticker_blue_star", "name": "Blue Star Sticker", "rarity": "N", "type": "sticker"},
-    {"id": "badge_daily_worker", "name": "Daily Worker", "rarity": "R", "type": "badge"},
-    {"id": "sticker_soft_cloud", "name": "Soft Cloud Sticker", "rarity": "R", "type": "sticker"},
-    {"id": "badge_persistent", "name": "Persistent Badge", "rarity": "SR", "type": "badge"},
-    {"id": "sticker_gold_frame", "name": "Gold Frame Sticker", "rarity": "SR", "type": "sticker"},
-    {"id": "badge_legend", "name": "Legend Badge", "rarity": "SSR", "type": "badge"},
+    {"id": "badge_beginner", "name": "Beginner Badge", "rarity": "N", "type": "badge", "image": "", "color": (0.35, 0.55, 1.0, 0.9)},
+    {"id": "sticker_blue_star", "name": "Blue Star Sticker", "rarity": "N", "type": "sticker", "image": "", "color": (0.35, 0.75, 1.0, 0.9)},
+    {"id": "badge_daily_worker", "name": "Daily Worker", "rarity": "R", "type": "badge", "image": "", "color": (0.75, 0.35, 1.0, 0.95)},
+    {"id": "sticker_soft_cloud", "name": "Soft Cloud Sticker", "rarity": "R", "type": "sticker", "image": "", "color": (0.95, 0.55, 1.0, 0.95)},
+    {"id": "badge_persistent", "name": "Persistent Badge", "rarity": "SR", "type": "badge", "image": "", "color": (1.0, 0.75, 0.25, 0.98)},
+    {"id": "sticker_gold_frame", "name": "Gold Frame Sticker", "rarity": "SR", "type": "sticker", "image": "", "color": (1.0, 0.85, 0.3, 0.98)},
+    {"id": "badge_legend", "name": "Legend Badge", "rarity": "SSR", "type": "badge", "image": "", "color": (1.0, 0.35, 0.35, 1.0)},
 ]
 
 # =========================================================
@@ -80,6 +82,18 @@ _RUNTIME = {
     "timer_registered": False,
     "notifications": [],
     "data": None,
+    "popup_state": {
+        "active": False,
+        "title": "",
+        "subtitle": "",
+        "rarity": "",
+        "expire_at": 0.0,
+        "color": (0.3, 0.7, 1.0, 0.9),
+        "image_path": "",
+        "image_name": "",
+    },
+    "draw_handler": None,
+    "preview_collection": None,
 }
 
 # =========================================================
@@ -133,7 +147,8 @@ def default_data() -> dict:
         "history": [],
         "settings": {
             "debug_mode": False,
-            "daily_bonus_claimed": False
+            "daily_bonus_claimed": False,
+            "image_folder_path": ""
         },
     }
 
@@ -236,6 +251,128 @@ def show_popup(message_lines: list[str], title: str = "通知", icon: str = 'INF
             wm.popup_menu(draw, title=title, icon=icon)
         except Exception:
             pass
+
+
+def get_item_definition(item_id: str) -> dict | None:
+    for item in GACHA_TABLE:
+        if item["id"] == item_id:
+            return item
+    return None
+
+
+def get_preview_icon_id(image_path: str, key: str) -> int:
+    if not image_path:
+        return 0
+    pcoll = _RUNTIME.get("preview_collection")
+    if pcoll is None:
+        return 0
+    try:
+        if key in pcoll:
+            preview = pcoll[key]
+            if getattr(preview, "icon_id", 0):
+                return preview.icon_id
+        preview = pcoll.load(key, image_path, 'IMAGE')
+        return preview.icon_id
+    except Exception:
+        return 0
+
+
+def _ensure_demo_image(item: dict) -> str:
+    # 0) user-configured image folder path
+    data = get_data()
+    image_folder_setting = data.get("settings", {}).get("image_folder_path", "") or ""
+    if image_folder_setting:
+        configured_dir = Path(image_folder_setting)
+        configured_path = configured_dir / f"{item['id']}.png"
+        if configured_path.exists():
+            return str(configured_path)
+
+    # 1) explicit image path on item
+    image_path = item.get("image", "") or ""
+    if image_path:
+        explicit = Path(image_path)
+        if not explicit.is_absolute():
+            explicit = Path(__file__).resolve().parent / explicit
+        if explicit.exists():
+            return str(explicit)
+
+    # 2) auto lookup by item id next to addon file
+    addon_dir = Path(__file__).resolve().parent
+    auto_path = addon_dir / "images" / f"{item['id']}.png"
+    if auto_path.exists():
+        return str(auto_path)
+
+    # 3) fallback demo image generation
+    try:
+        from PIL import Image, ImageDraw
+    except Exception:
+        return ""
+
+    cache_dir = Path(tempfile.gettempdir()) / ADDON_ID
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    out_path = cache_dir / f"{item['id']}.png"
+    if out_path.exists():
+        return str(out_path)
+
+    size = 256
+    rgba = item.get("color", (0.5, 0.5, 0.5, 1.0))
+    color = tuple(int(max(0.0, min(1.0, c)) * 255) for c in rgba[:3])
+    img = Image.new("RGBA", (size, size), color + (255,))
+    draw = ImageDraw.Draw(img)
+    draw.rounded_rectangle((12, 12, size - 12, size - 12), radius=24, outline=(255, 255, 255, 220), width=4)
+    draw.text((24, 24), item.get("rarity", "?"), fill=(255, 255, 255, 255))
+    draw.text((24, 72), item.get("name", "ITEM")[:18], fill=(255, 255, 255, 255))
+    img.save(out_path)
+    return str(out_path)
+
+    size = 256
+    rgba = item.get("color", (0.5, 0.5, 0.5, 1.0))
+    color = tuple(int(max(0.0, min(1.0, c)) * 255) for c in rgba[:3])
+    img = Image.new("RGBA", (size, size), color + (255,))
+    draw = ImageDraw.Draw(img)
+    draw.rounded_rectangle((12, 12, size - 12, size - 12), radius=24, outline=(255, 255, 255, 220), width=4)
+    draw.text((24, 24), item.get("rarity", "?"), fill=(255, 255, 255, 255))
+    draw.text((24, 72), item.get("name", "ITEM")[:18], fill=(255, 255, 255, 255))
+    img.save(out_path)
+    return str(out_path)
+
+    size = 256
+    rgba = item.get("color", (0.5, 0.5, 0.5, 1.0))
+    color = tuple(int(max(0.0, min(1.0, c)) * 255) for c in rgba[:3])
+    img = Image.new("RGBA", (size, size), color + (255,))
+    draw = ImageDraw.Draw(img)
+    draw.rounded_rectangle((12, 12, size - 12, size - 12), radius=24, outline=(255, 255, 255, 220), width=4)
+    draw.text((24, 24), item.get("rarity", "?"), fill=(255, 255, 255, 255))
+    draw.text((24, 72), item.get("name", "ITEM")[:18], fill=(255, 255, 255, 255))
+    img.save(out_path)
+    return str(out_path)
+
+
+def show_image_popup(item: dict, is_new: bool, refund: int = 0) -> None:
+    image_path = _ensure_demo_image(item)
+    popup = _RUNTIME["popup_state"]
+    popup["active"] = True
+    popup["title"] = item.get("name", "")
+    popup["subtitle"] = "NEW" if is_new else (f"重複 返還 +{refund}石" if refund > 0 else "重複")
+    popup["rarity"] = item.get("rarity", "")
+    popup["expire_at"] = time.time() + 2.5
+    popup["color"] = item.get("color", (0.3, 0.7, 1.0, 0.9))
+    popup["image_path"] = image_path
+    popup["image_name"] = f"{ADDON_ID}_{item['id']}"
+
+    if image_path:
+        try:
+            img_name = popup["image_name"]
+            if img_name in bpy.data.images:
+                img = bpy.data.images[img_name]
+                img.reload()
+            else:
+                img = bpy.data.images.load(image_path)
+                img.name = img_name
+        except Exception:
+            popup["image_path"] = ""
+
+    sync_scene_props_to_data()
 
 
 
@@ -428,8 +565,22 @@ def draw_gacha_once() -> tuple[bool, str, dict | None]:
             "重複",
             f"返還 +{refund}石",
         ], title="ガチャ結果", icon='INFO')
+        show_image_popup(item, is_new=False, refund=refund)
         sync_scene_props_to_data()
         return True, msg, item
+
+    add_item_to_inventory(item)
+    msg = f"{rarity} {item['name']} を獲得！"
+    append_history("gacha", item["id"], msg)
+    add_notification(msg)
+    show_popup([
+        f"{rarity} 獲得！",
+        item['name'],
+        "新規獲得",
+    ], title="ガチャ結果", icon='CHECKMARK')
+    show_image_popup(item, is_new=True)
+    sync_scene_props_to_data()
+    return True, msg, item
 
     add_item_to_inventory(item)
     msg = f"{rarity} {item['name']} を獲得！"
@@ -511,6 +662,7 @@ def sync_scene_props_to_data() -> None:
     scene.hg_login_streak = data["player"]["login_streak"]
     scene.hg_last_message = _RUNTIME["notifications"][0] if _RUNTIME["notifications"] else ""
     scene.hg_elapsed_label = format_seconds_to_mmss(get_session_elapsed_seconds())
+    scene.hg_image_folder_input = data.get("settings", {}).get("image_folder_path", "") or ""
 
 # =========================================================
 # Timer
@@ -531,6 +683,11 @@ def timer_tick():
         required_seconds = get_required_session_seconds()
         if elapsed >= required_seconds and not has_claimed_today("session_15m"):
             grant_reward("session_15m")
+
+        popup = _RUNTIME["popup_state"]
+        if popup["active"] and time.time() >= popup["expire_at"]:
+            popup["active"] = False
+            popup["image_path"] = ""
 
     except Exception as exc:
         print(f"[{ADDON_ID}] Timer error: {exc}")
@@ -600,6 +757,7 @@ class HG_InventoryItem(bpy.types.PropertyGroup):
     name: StringProperty(name="Name")
     rarity: StringProperty(name="Rarity")
     item_type: StringProperty(name="Type")
+    image_path: StringProperty(name="Image Path")
 
 # =========================================================
 # Collection refresh
@@ -629,6 +787,7 @@ def refresh_ui_collections(scene: bpy.types.Scene | None = None) -> None:
             item.name = definition["name"]
             item.rarity = definition["rarity"]
             item.item_type = definition["type"]
+            item.image_path = _ensure_demo_image(definition)
 
     sync_scene_props_to_data()
 
@@ -705,6 +864,59 @@ class HG_OT_ToggleDebugMode(bpy.types.Operator):
         append_history("system", "toggle_debug_mode", msg)
         add_notification(msg)
         refresh_ui_collections(context.scene)
+        self.report({'INFO'}, msg)
+        return {'FINISHED'}
+
+
+class HG_OT_SetImageFolderPath(bpy.types.Operator):
+    bl_idname = "habit.set_image_folder_path"
+    bl_label = "画像フォルダ設定"
+    bl_description = "画像フォルダの絶対パスを保存します"
+
+    def execute(self, context):
+        folder_path = (context.scene.hg_image_folder_input or "").strip()
+        data = get_data()
+        data["settings"]["image_folder_path"] = folder_path
+        save_data(data)
+        refresh_ui_collections(context.scene)
+        msg = f"画像フォルダを設定しました: {folder_path if folder_path else '未設定'}"
+        append_history("system", "set_image_folder_path", msg)
+        add_notification(msg)
+        self.report({'INFO'}, msg)
+        return {'FINISHED'}
+
+
+class HG_OT_BrowseImageFolderPath(bpy.types.Operator):
+    bl_idname = "habit.browse_image_folder_path"
+    bl_label = "画像フォルダ参照"
+    bl_description = "画像フォルダを選択して入力欄に反映します"
+
+    directory: StringProperty(name="Directory", default="", subtype='DIR_PATH')
+
+    def invoke(self, context, event):
+        self.directory = context.scene.hg_image_folder_input or ""
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
+
+    def execute(self, context):
+        context.scene.hg_image_folder_input = self.directory
+        self.report({'INFO'}, f"選択中: {self.directory}")
+        return {'FINISHED'}
+
+
+class HG_OT_ClearImageFolderPath(bpy.types.Operator):
+    bl_idname = "habit.clear_image_folder_path"
+    bl_label = "画像フォルダ解除"
+    bl_description = "設定済みの画像フォルダパスを解除します"
+
+    def execute(self, context):
+        data = get_data()
+        data["settings"]["image_folder_path"] = ""
+        save_data(data)
+        refresh_ui_collections(context.scene)
+        msg = "画像フォルダ設定を解除しました"
+        append_history("system", "clear_image_folder_path", msg)
+        add_notification(msg)
         self.report({'INFO'}, msg)
         return {'FINISHED'}
 
@@ -817,6 +1029,20 @@ class HG_PT_CollectionPanel(bpy.types.Panel):
         row.label(text=f"バッジ: {len(badges)}")
         row.label(text=f"ステッカー: {len(stickers)}")
 
+        if 0 <= scene.hg_inventory_index < len(scene.hg_inventory_items):
+            selected = scene.hg_inventory_items[scene.hg_inventory_index]
+            box = layout.box()
+            box.label(text=f"{selected.rarity} / {selected.item_type}")
+            box.label(text=selected.name)
+            if selected.image_path:
+                icon_id = get_preview_icon_id(selected.image_path, selected.item_id)
+                if icon_id:
+                    box.template_icon(icon_value=icon_id, scale=8.0)
+                    box.label(text=selected.image_path)
+                else:
+                    box.label(text="画像プレビュー読み込み失敗")
+                    box.label(text=selected.image_path)
+
         layout.template_list(
             "HG_UL_inventory_list",
             "",
@@ -824,6 +1050,7 @@ class HG_PT_CollectionPanel(bpy.types.Panel):
             "hg_inventory_items",
             scene,
             "hg_inventory_index",
+        "hg_image_folder_input",
             rows=8,
         )
 
@@ -877,6 +1104,16 @@ class HG_PT_SettingsPanel(bpy.types.Panel):
         box.label(text=f"15分報酬条件: {seconds}秒")
 
         box = layout.box()
+        box.label(text="画像フォルダ", icon='FILE_FOLDER')
+        image_folder = settings.get('image_folder_path', '')
+        box.label(text=f"保存済み: {image_folder if image_folder else '未設定'}")
+        box.prop(context.scene, "hg_image_folder_input", text="入力")
+        row = box.row(align=True)
+        row.operator("habit.browse_image_folder_path", icon='FILE_FOLDER', text='参照')
+        row.operator("habit.set_image_folder_path", icon='CHECKMARK', text='保存')
+        row.operator("habit.clear_image_folder_path", icon='X', text='解除')
+
+        box = layout.box()
         box.label(text="保存データ", icon='FILE_TICK')
         box.operator("habit.reload_data", icon='FILE_REFRESH')
         box.operator("habit.reset_save", icon='TRASH')
@@ -896,6 +1133,9 @@ classes = (
     HG_OT_DrawGacha,
     HG_OT_DebugAddStones,
     HG_OT_ToggleDebugMode,
+    HG_OT_SetImageFolderPath,
+    HG_OT_BrowseImageFolderPath,
+    HG_OT_ClearImageFolderPath,
     HG_OT_ReloadData,
     HG_OT_ResetSave,
     HG_PT_MainPanel,
@@ -915,6 +1155,7 @@ def register_props():
     bpy.types.Scene.hg_history_index = IntProperty(default=0)
     bpy.types.Scene.hg_inventory_items = bpy.props.CollectionProperty(type=HG_InventoryItem)
     bpy.types.Scene.hg_inventory_index = IntProperty(default=0)
+    bpy.types.Scene.hg_image_folder_input = StringProperty(name="Image Folder Input", default="", subtype='DIR_PATH')
 
 
 
@@ -935,20 +1176,91 @@ def unregister_props():
 
 
 
+def register_popup_draw_handler() -> None:
+    if _RUNTIME["draw_handler"] is not None:
+        return
+
+    def _draw_popup_overlay():
+        popup = _RUNTIME["popup_state"]
+        if not popup.get("active"):
+            return
+
+        try:
+            import blf
+            from gpu_extras.batch import batch_for_shader
+            import gpu
+        except Exception:
+            return
+
+        region = getattr(bpy.context, "region", None)
+        if region is None:
+            return
+
+        width = region.width
+        height = region.height
+        x = width - 300
+        y = height - 170
+        w = 260
+        h = 120
+        color = popup.get("color", (0.3, 0.7, 1.0, 0.9))
+
+        shader = gpu.shader.from_builtin('UNIFORM_COLOR')
+        vertices = ((x, y), (x + w, y), (x + w, y + h), (x, y + h))
+        batch = batch_for_shader(shader, 'TRI_FAN', {"pos": vertices})
+        gpu.state.blend_set('ALPHA')
+        shader.bind()
+        shader.uniform_float("color", (0.05, 0.05, 0.08, 0.82))
+        batch.draw(shader)
+
+        border = batch_for_shader(shader, 'LINE_LOOP', {"pos": vertices})
+        shader.uniform_float("color", color)
+        border.draw(shader)
+
+        font_id = 0
+        blf.position(font_id, x + 16, y + h - 28, 0)
+        blf.size(font_id, 18.0)
+        blf.color(font_id, color[0], color[1], color[2], 1.0)
+        blf.draw(font_id, popup.get("rarity", ""))
+
+        blf.position(font_id, x + 16, y + h - 54, 0)
+        blf.size(font_id, 16.0)
+        blf.color(font_id, 1.0, 1.0, 1.0, 1.0)
+        blf.draw(font_id, popup.get("title", ""))
+
+        blf.position(font_id, x + 16, y + h - 80, 0)
+        blf.size(font_id, 13.0)
+        blf.color(font_id, 0.9, 0.9, 0.9, 1.0)
+        blf.draw(font_id, popup.get("subtitle", ""))
+
+    _RUNTIME["draw_handler"] = bpy.types.SpaceView3D.draw_handler_add(
+        _draw_popup_overlay, (), 'WINDOW', 'POST_PIXEL'
+    )
+
+
+def unregister_popup_draw_handler() -> None:
+    if _RUNTIME["draw_handler"] is not None:
+        try:
+            bpy.types.SpaceView3D.draw_handler_remove(_RUNTIME["draw_handler"], 'WINDOW')
+        except Exception:
+            pass
+        _RUNTIME["draw_handler"] = None
+
+
 def register():
     for cls in classes:
         bpy.utils.register_class(cls)
 
     register_props()
 
+    _RUNTIME["preview_collection"] = bpy.utils.previews.new()
     _RUNTIME["data"] = load_data()
     _RUNTIME["session_start"] = time.time()
     _RUNTIME["notifications"] = []
 
     register_timer()
+    register_popup_draw_handler()
 
     if bpy.context.scene:
-        ensure_scene_props_defaults(bpy.context.scene)
         refresh_ui_collections(bpy.context.scene)
 
     print(f"[{ADDON_ID}] registered")
@@ -957,6 +1269,13 @@ def register():
 
 def unregister():
     unregister_timer()
+    unregister_popup_draw_handler()
+    if _RUNTIME.get("preview_collection") is not None:
+        try:
+            bpy.utils.previews.remove(_RUNTIME["preview_collection"])
+        except Exception:
+            pass
+        _RUNTIME["preview_collection"] = None
     unregister_props()
 
     for cls in reversed(classes):

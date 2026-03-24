@@ -25,6 +25,7 @@ PANEL_CATEGORY = "Habit Gacha"
 DATA_VERSION = 1
 GACHA_COST = 300
 SESSION_REWARD_SECONDS = 15 * 60
+DEBUG_SESSION_REWARD_SECONDS = 10
 TIMER_INTERVAL = 5.0
 MAX_HISTORY = 50
 
@@ -132,6 +133,7 @@ def default_data() -> dict:
         "history": [],
         "settings": {
             "debug_mode": False,
+            "daily_bonus_claimed": False
         },
     }
 
@@ -199,6 +201,7 @@ def ensure_daily_reset(data: dict) -> None:
             "missions_completed": [],
             "all_completed": False,
         }
+        data["settings"]["daily_bonus_claimed"] = False
         save_data(data)
 
 
@@ -220,6 +223,19 @@ def add_notification(text: str) -> None:
     _RUNTIME["notifications"].insert(0, text)
     _RUNTIME["notifications"] = _RUNTIME["notifications"][:10]
     sync_scene_props_to_data()
+
+
+def show_popup(message_lines: list[str], title: str = "通知", icon: str = 'INFO') -> None:
+    def draw(self, context):
+        for line in message_lines:
+            self.layout.label(text=line)
+
+    wm = getattr(bpy.context, "window_manager", None)
+    if wm is not None:
+        try:
+            wm.popup_menu(draw, title=title, icon=icon)
+        except Exception:
+            pass
 
 
 
@@ -334,6 +350,7 @@ def grant_reward(event_id: str) -> tuple[bool, str]:
     append_history("reward", event_id, msg)
     add_notification(msg)
     sync_scene_props_to_data()
+    check_daily_complete_bonus()
     return True, msg
 
 
@@ -405,8 +422,26 @@ def draw_gacha_once() -> tuple[bool, str, dict | None]:
         msg = f"{rarity} {item['name']}（重複） 返還 +{refund}石"
         append_history("gacha", item["id"], msg)
         add_notification(msg)
+        show_popup([
+            f"{rarity} 獲得",
+            item['name'],
+            "重複",
+            f"返還 +{refund}石",
+        ], title="ガチャ結果", icon='INFO')
         sync_scene_props_to_data()
         return True, msg, item
+
+    add_item_to_inventory(item)
+    msg = f"{rarity} {item['name']} を獲得！"
+    append_history("gacha", item["id"], msg)
+    add_notification(msg)
+    show_popup([
+        f"{rarity} 獲得！",
+        item['name'],
+        "新規獲得",
+    ], title="ガチャ結果", icon='CHECKMARK')
+    sync_scene_props_to_data()
+    return True, msg, item
 
     add_item_to_inventory(item)
     msg = f"{rarity} {item['name']} を獲得！"
@@ -428,6 +463,32 @@ def format_seconds_to_mmss(seconds: int) -> str:
     minutes = seconds // 60
     remain = seconds % 60
     return f"{minutes:02d}:{remain:02d}"
+
+
+def get_required_session_seconds() -> int:
+    data = get_data()
+    return DEBUG_SESSION_REWARD_SECONDS if data["settings"].get("debug_mode", False) else SESSION_REWARD_SECONDS
+
+
+def check_daily_complete_bonus() -> None:
+    data = get_data()
+    ensure_daily_reset(data)
+    required = {"daily_login", "work_start", "session_15m"}
+    claimed = set(data["daily"].get("claimed_rewards", []))
+    if required.issubset(claimed) and not data["settings"].get("daily_bonus_claimed", False):
+        bonus = 50
+        add_stones(bonus)
+        data["daily"]["all_completed"] = True
+        data["settings"]["daily_bonus_claimed"] = True
+        save_data(data)
+        msg = f"デイリー全達成ボーナス +{bonus}石"
+        append_history("reward", "daily_all_complete", msg)
+        add_notification(msg)
+        show_popup([
+            "デイリー全達成！",
+            f"ボーナス +{bonus}石",
+        ], title="デイリーボーナス", icon='CHECKMARK')
+        sync_scene_props_to_data()
 
 # =========================================================
 # Scene properties sync
@@ -467,7 +528,8 @@ def timer_tick():
         elapsed = get_session_elapsed_seconds()
         sync_scene_props_to_data()
 
-        if elapsed >= SESSION_REWARD_SECONDS and not has_claimed_today("session_15m"):
+        required_seconds = get_required_session_seconds()
+        if elapsed >= required_seconds and not has_claimed_today("session_15m"):
             grant_reward("session_15m")
 
     except Exception as exc:
@@ -628,6 +690,25 @@ class HG_OT_DebugAddStones(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class HG_OT_ToggleDebugMode(bpy.types.Operator):
+    bl_idname = "habit.toggle_debug_mode"
+    bl_label = "デバッグ時短切替"
+    bl_description = "15分継続報酬を短時間テスト用に切り替えます"
+
+    def execute(self, context):
+        data = get_data()
+        current = data["settings"].get("debug_mode", False)
+        data["settings"]["debug_mode"] = not current
+        save_data(data)
+        state = "ON" if data["settings"]["debug_mode"] else "OFF"
+        msg = f"デバッグ時短: {state}"
+        append_history("system", "toggle_debug_mode", msg)
+        add_notification(msg)
+        refresh_ui_collections(context.scene)
+        self.report({'INFO'}, msg)
+        return {'FINISHED'}
+
+
 class HG_OT_ReloadData(bpy.types.Operator):
     bl_idname = "habit.reload_data"
     bl_label = "データ再読込"
@@ -690,6 +771,8 @@ class HG_PT_MainPanel(bpy.types.Panel):
         col.label(text=f"ログイン報酬: {'受取済み' if has_claimed_today('daily_login') else '未受取'}")
         col.label(text=f"作業開始報酬: {'受取済み' if has_claimed_today('work_start') else '未受取'}")
         col.label(text=f"15分継続報酬: {'受取済み' if has_claimed_today('session_15m') else '未受取'}")
+        daily_complete = data["daily"].get("all_completed", False)
+        col.label(text=f"全達成ボーナス: {'受取済み' if daily_complete else '未達成'}")
 
         row = layout.row(align=True)
         row.operator("habit.claim_login_reward", icon='IMPORT')
@@ -787,7 +870,11 @@ class HG_PT_SettingsPanel(bpy.types.Panel):
         row = box.row(align=True)
         op = row.operator("habit.debug_add_stones", icon='ADD')
         op.amount = 500
+        row = box.row(align=True)
+        row.operator("habit.toggle_debug_mode", icon='RECOVER_LAST')
         box.label(text=f"Debug mode: {'ON' if settings.get('debug_mode') else 'OFF'}")
+        seconds = DEBUG_SESSION_REWARD_SECONDS if settings.get('debug_mode') else SESSION_REWARD_SECONDS
+        box.label(text=f"15分報酬条件: {seconds}秒")
 
         box = layout.box()
         box.label(text="保存データ", icon='FILE_TICK')
@@ -808,6 +895,7 @@ classes = (
     HG_OT_StartWork,
     HG_OT_DrawGacha,
     HG_OT_DebugAddStones,
+    HG_OT_ToggleDebugMode,
     HG_OT_ReloadData,
     HG_OT_ResetSave,
     HG_PT_MainPanel,
